@@ -46,7 +46,7 @@ def DB_SearchSimilarOp : DB_Op<"search_similar", []> {
   );
 
   let results = (outs
-    Index:$result
+    AnyRankedTensor:$result
   );
 
   let assemblyFormat = [{

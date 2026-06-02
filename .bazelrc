@@ -71,6 +71,7 @@ build:macos --no@fuzztest//fuzztest:use_riegeli
 # MacOS arm64 config
 build:macos_arm64 --cpu=darwin_arm64
 build:macos_arm64 --macos_minimum_os=11.0
+build:macos_arm64 --host_macos_minimum_os=11.0
 # openmp is not supported in apple clang
 build:macos_arm64 --@openfhe//:enable_openmp=False
 

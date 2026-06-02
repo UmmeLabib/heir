@@ -19,6 +19,7 @@
 #include "lib/Dialect/Cheddar/IR/CheddarDialect.h"
 #include "lib/Dialect/Comb/IR/CombDialect.h"
 #include "lib/Dialect/DB/IR/DBDialect.h"
+#include "lib/Dialect/DB/Transforms/Passes.h"
 #include "lib/Dialect/Debug/IR/DebugDialect.h"
 #include "lib/Dialect/Debug/Transforms/Passes.h"
 #include "lib/Dialect/HEIRInterfaces.h"
@@ -483,6 +484,7 @@ int main(int argc, char** argv) {
 #endif
 
   // Dialect conversion passes in HEIR
+  db::registerDBToLinalgPass();
   bgv::registerBGVToLWEPasses();
   lwe::registerLWEToJaxiteWordPasses();
   lwe::registerLWEToLattigoPasses();

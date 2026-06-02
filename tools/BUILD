@@ -61,6 +61,7 @@ cc_binary(
         "@heir//lib/Dialect/Cheddar/IR:Dialect",
         "@heir//lib/Dialect/Comb/IR:Dialect",
         "@heir//lib/Dialect/DB/IR:Dialect",
+        "@heir//lib/Dialect/DB/Transforms",
         "@heir//lib/Dialect/Debug/IR:Dialect",
         "@heir//lib/Dialect/Debug/Transforms",
         "@heir//lib/Dialect/Jaxite/IR:Dialect",
