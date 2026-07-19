@@ -10,25 +10,24 @@ cc_library(
     name = "Transforms",
     hdrs = ["Passes.h"],
     deps = [
-        ":DBToLinalg",
+        ":DBToCiphertextSemantic",
         ":pass_inc_gen",
         "@heir//lib/Dialect/DB/IR:Dialect",
     ],
 )
 
 cc_library(
-    name = "DBToLinalg",
-    srcs = ["DBToLinalg.cpp"],
-    hdrs = ["DBToLinalg.h"],
+    name = "DBToCiphertextSemantic",
+    srcs = ["DBToCiphertextSemantic.cpp"],
+    hdrs = ["DBToCiphertextSemantic.h"],
     deps = [
         ":pass_inc_gen",
         "@heir//lib/Dialect/DB/IR:Dialect",
+        "@heir//lib/Dialect/TensorExt/IR:Dialect",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:LinalgDialect",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",

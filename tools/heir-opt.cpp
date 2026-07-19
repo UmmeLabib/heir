@@ -484,7 +484,7 @@ int main(int argc, char** argv) {
 #endif
 
   // Dialect conversion passes in HEIR
-  db::registerDBToLinalgPass();
+  db::registerDBToCiphertextSemanticPass();
   bgv::registerBGVToLWEPasses();
   lwe::registerLWEToJaxiteWordPasses();
   lwe::registerLWEToLattigoPasses();

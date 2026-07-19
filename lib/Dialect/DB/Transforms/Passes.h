@@ -2,7 +2,7 @@
 #define LIB_DIALECT_DB_TRANSFORMS_PASSES_H_
 
 #include "lib/Dialect/DB/IR/DBDialect.h"
-#include "lib/Dialect/DB/Transforms/DBToLinalg.h"
+#include "lib/Dialect/DB/Transforms/DBToCiphertextSemantic.h"
 
 namespace mlir {
 namespace heir {
