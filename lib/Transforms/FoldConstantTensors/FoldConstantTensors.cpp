@@ -145,6 +145,14 @@ class InsertIntoFromElements final : public OpRewritePattern<tensor::InsertOp> {
         return rewriter.notifyMatchFailure(currentInsertOp,
                                            "failed to compute flattened index");
 
+      // Only fold chains of constant scalars: a non-constant scalar (e.g. a
+      // tensor.extract interleaved between the inserts) may be defined after
+      // the first insert, and the from_elements op created at that point
+      // would violate dominance.
+      if (!matchPattern(currentInsertOp.getScalar(), m_Constant()))
+        return rewriter.notifyMatchFailure(currentInsertOp,
+                                           "non-constant inserted scalar");
+
       // Overriding values in the tensor is not supported.
       auto flatIndex = maybeFlatIndex.value();
       if (flatIndexToElement.contains(flatIndex)) return failure();
