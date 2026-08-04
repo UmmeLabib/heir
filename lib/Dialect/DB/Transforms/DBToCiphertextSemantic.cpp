@@ -41,6 +41,10 @@ constexpr int64_t kNumF = 2;
 // Client contract: data normalized into [-bound, bound] before encryption.
 constexpr double kSortInputAbsBound = 4.0;
 
+// search_similar contract: query and database rows are unit-normalized, so
+// dot-product scores are cosines in [-1, 1] (score differences in [-2, 2]).
+constexpr double kScoreAbsBound = 1.0;
+
 APFloat apFloatIn(FloatType fty, double value) {
   APFloat v(value);
   bool losesInfo = false;
@@ -396,6 +400,129 @@ struct LowerSortOp : public OpRewritePattern<SortOp> {
   }
 };
 
+// db.search_similar: score each row against the query (dot product), rank the
+// scores on the shared kernel, then deliver the top-k rows (badges n..n-k+1)
+// via encrypted masks -- their contents concatenated, never their indices.
+LogicalResult lowerSearchSimilar(SearchSimilarOp op,
+                                 PatternRewriter &rewriter) {
+  Location loc = op.getLoc();
+  Value query = op.getQuery();
+  Value database = op.getDatabase();
+
+  auto qTy = llvm::dyn_cast<RankedTensorType>(query.getType());
+  auto dbTy = llvm::dyn_cast<RankedTensorType>(database.getType());
+  if (!qTy || qTy.getRank() != 1)
+    return rewriter.notifyMatchFailure(op, "query must be a 1-D ranked tensor");
+  if (!dbTy || dbTy.getRank() != 2)
+    return rewriter.notifyMatchFailure(op,
+                                       "database must be a 2-D ranked tensor");
+
+  int64_t numRows = dbTy.getDimSize(0);
+  int64_t dim = dbTy.getDimSize(1);
+  if (qTy.getDimSize(0) != dim)
+    return rewriter.notifyMatchFailure(
+        op, "query length must match the database feature dimension");
+  Type elemTy = qTy.getElementType();
+  if (!llvm::isa<FloatType>(elemTy))
+    return rewriter.notifyMatchFailure(
+        op, "search_similar requires a floating-point element type (CKKS)");
+  if (!isPowerOfTwo(numRows) || !isPowerOfTwo(dim))
+    return rewriter.notifyMatchFailure(
+        op, "row count and feature dimension must each be a power of two");
+  int64_t k = op.getK();
+  if (k < 1 || k > numRows)
+    return rewriter.notifyMatchFailure(op, "k must be in [1, numRows]");
+  auto resultTy = RankedTensorType::get({k * dim}, elemTy);
+  if (op.getResult().getType() != resultTy)
+    return rewriter.notifyMatchFailure(
+        op, "result type must be tensor<k*dim> (top-k rows concatenated)");
+  // Square delivery hall reuses the max/min/sort helpers; rectangular
+  // databases (rows != features) are a later milestone.
+  if (numRows != dim)
+    return rewriter.notifyMatchFailure(
+        op, "row count and feature dimension must match (square hall)");
+
+  auto rowTy = RankedTensorType::get({dim}, elemTy);
+  auto scoreTy = RankedTensorType::get({numRows}, elemTy);
+  Value idx0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+
+  // Stage 1: scores[r] = <query, db[r]>.  Cache each row for delivery.
+  llvm::SmallVector<Value> rows;
+  rows.reserve(numRows);
+  Value scores = constSplat(rewriter, loc, scoreTy, 0.0);
+  for (int64_t r = 0; r < numRows; ++r) {
+    llvm::SmallVector<OpFoldResult> offsets{rewriter.getIndexAttr(r),
+                                            rewriter.getIndexAttr(0)};
+    llvm::SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(1),
+                                          rewriter.getIndexAttr(dim)};
+    llvm::SmallVector<OpFoldResult> strides{rewriter.getIndexAttr(1),
+                                            rewriter.getIndexAttr(1)};
+    Value row = tensor::ExtractSliceOp::create(rewriter, loc, rowTy, database,
+                                               offsets, sizes, strides);
+    rows.push_back(row);
+    Value prod = arith::MulFOp::create(rewriter, loc, query, row);
+    Value reduced = rotateReduceAddVector(rewriter, loc, prod);
+    Value score =
+        tensor::ExtractOp::create(rewriter, loc, reduced, ValueRange{idx0});
+    Value rIdx = arith::ConstantIndexOp::create(rewriter, loc, r);
+    scores = tensor::InsertOp::create(rewriter, loc, score, scores,
+                                      ValueRange{rIdx});
+  }
+
+  // Stages 2-3: rank the scores once (shared kernel).  Tie-corrected badges
+  // are an exact permutation of 1..n, so the top-k rows are exactly those
+  // wearing badges n, n-1, ..., n-k+1 (one document each, even under ties).
+  int64_t n = numRows;  // == dim (square hall)
+  RankResult rank = rankWithTieCorrection(rewriter, loc, scores, n,
+                                          1.0 / (2.0 * kScoreAbsBound));
+  auto hallTy = llvm::cast<RankedTensorType>(rank.rankMat.getType());
+
+  // Flatten the database into the hall once (rows[r] into row r); reused by
+  // every delivery below.
+  Value dbHall = constSplat(rewriter, loc, hallTy, 0.0);
+  for (int64_t r = 0; r < n; ++r) {
+    Value inRow0 = embedAsRow0(rewriter, loc, rows[r], n);
+    dbHall = arith::AddFOp::create(rewriter, loc, dbHall,
+                                   rotateRight(rewriter, loc, inRow0, r * n));
+  }
+
+  // Stages 4-5: for j = 0..k-1, spotlight badge n-j (the (j+1)-th best),
+  // deliver its row, and stack it into result block j.  The k indicators are
+  // independent (all read rankMat), so comparison depth stays 2.
+  Value resultHall = constSplat(rewriter, loc, hallTy, 0.0);
+  for (int64_t j = 0; j < k; ++j) {
+    Value mask = indicatorAround(rewriter, loc, rank.rankMat,
+                                 static_cast<double>(n - j), 1.0 / (n + 1.0));
+    Value maskHall = replCol0(rewriter, loc,
+                              transRow0ToCol0(rewriter, loc, mask, n), n);
+    Value picked = arith::MulFOp::create(rewriter, loc, maskHall, dbHall);
+    Value folded = sumRows(rewriter, loc, picked, n);  // winner in row 0
+    resultHall = arith::AddFOp::create(
+        rewriter, loc, resultHall, rotateRight(rewriter, loc, folded, j * n));
+  }
+
+  // Extract the first k rows (k*dim slots) as the concatenated result.
+  Value result = constSplat(rewriter, loc, resultTy, 0.0);
+  for (int64_t c = 0; c < k * dim; ++c) {
+    Value cIdx = arith::ConstantIndexOp::create(rewriter, loc, c);
+    Value elem =
+        tensor::ExtractOp::create(rewriter, loc, resultHall, ValueRange{cIdx});
+    result = tensor::InsertOp::create(rewriter, loc, elem, result,
+                                      ValueRange{cIdx});
+  }
+  rewriter.replaceOp(op, result);
+  return success();
+}
+
+struct LowerSearchSimilarOp : public OpRewritePattern<SearchSimilarOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SearchSimilarOp op,
+                                PatternRewriter &rewriter) const override {
+    return lowerSearchSimilar(op, rewriter);
+  }
+};
+
 struct DBToCiphertextSemantic
     : public impl::DBToCiphertextSemanticBase<DBToCiphertextSemantic> {
   using DBToCiphertextSemanticBase::DBToCiphertextSemanticBase;
@@ -403,8 +530,8 @@ struct DBToCiphertextSemantic
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
-    // db.search_similar migrates onto the same kernel next.
-    patterns.add<LowerMaxOp, LowerMinOp, LowerSortOp>(context);
+    patterns.add<LowerMaxOp, LowerMinOp, LowerSortOp, LowerSearchSimilarOp>(
+        context);
     (void)applyPatternsGreedily(getOperation(), std::move(patterns));
   }
 };

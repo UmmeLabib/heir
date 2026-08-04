@@ -60,7 +60,9 @@ static LogicalResult verifyQueryDbElementTypesMatch(mlir::Operation *op,
 
 static LogicalResult verifySearchSimilarResult(mlir::Operation *op,
                                                RankedTensorType queryType,
-                                               RankedTensorType resultType) {
+                                               RankedTensorType dbType,
+                                               RankedTensorType resultType,
+                                               int64_t k) {
   if (resultType.getRank() != 1)
     return op->emitOpError("result must be a 1-D tensor, but got rank ")
            << resultType.getRank();
@@ -69,12 +71,18 @@ static LogicalResult verifySearchSimilarResult(mlir::Operation *op,
                "result element type must match query element type, but got ")
            << resultType.getElementType() << " vs "
            << queryType.getElementType();
+  int64_t numRows = dbType.getDimSize(0);
+  if (k < 1 || (numRows != ShapedType::kDynamic && k > numRows))
+    return op->emitOpError("k (")
+           << k << ") must be in [1, numRows (" << numRows << ")]";
+  // Result concatenates the top-k rows: length k * dim.
   int64_t queryLen = queryType.getDimSize(0);
   int64_t resultLen = resultType.getDimSize(0);
   if (queryLen != ShapedType::kDynamic && resultLen != ShapedType::kDynamic &&
-      queryLen != resultLen)
+      resultLen != k * queryLen)
     return op->emitOpError("result length (")
-           << resultLen << ") must match query length (" << queryLen << ")";
+           << resultLen << ") must be k * query length (" << k << " * "
+           << queryLen << " = " << k * queryLen << ")";
   return success();
 }
 
@@ -93,7 +101,8 @@ LogicalResult SearchSimilarOp::verify() {
   if (failed(verifyQueryDbLengthsMatch(op, queryType, dbType))) return failure();
   if (failed(verifyQueryDbElementTypesMatch(op, queryType, dbType)))
     return failure();
-  if (failed(verifySearchSimilarResult(op, queryType, resultType)))
+  if (failed(verifySearchSimilarResult(op, queryType, dbType, resultType,
+                                       getK())))
     return failure();
 
   return success();

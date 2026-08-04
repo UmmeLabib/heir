@@ -17,32 +17,32 @@ class DB_Op<string mnemonic, list<Trait> traits = []> :
 //===----------------------------------------------------------------------===//
 
 def DB_SearchSimilarOp : DB_Op<"search_similar", []> {
-  let summary = "Find the index of the most similar vector in a database.";
+  let summary = "Return the k database rows most similar to a query vector.";
 
   let description = [{
     `db.search_similar` computes the dot-product similarity between a query
-    vector and every row of a database matrix, then returns the index of the
-    most similar (highest inner-product) row.
+    vector and every row of a database matrix, then returns the `k` most
+    similar (highest inner-product) rows -- their contents, concatenated,
+    NOT their indices (the selection stays oblivious under FHE).
 
-    This op is a high-level abstraction for nearest-neighbor search, intended
-    to be lowered to a sequence of dot-product kernels followed by an argmax
-    reduction over secret values.
-
-    The `query` operand is a 1-D ranked tensor and the `database` operand is
-    a 2-D ranked tensor whose second dimension matches the query length.  The
-    result is the 0-based row index of the best match.
+    The optional `k` attribute (default 1) selects the top-k rows.  The
+    `query` operand is a 1-D ranked tensor of length `dim`; the `database`
+    operand is a 2-D ranked tensor `numRows x dim`.  The result is a 1-D
+    tensor of length `k * dim`: the best match in the first `dim` slots, the
+    second best in the next `dim`, and so on.
 
     Example:
     ```mlir
-    // query: tensor<128xf32>, database: tensor<1024x128xf32>
-    %idx = db.search_similar %query, %database
-               : tensor<128xf32>, tensor<1024x128xf32> -> index
+    // top-2 of 1024 rows, each 128-D: result is the 2 rows concatenated
+    %rows = db.search_similar %query, %database {k = 2 : i64}
+                : tensor<128xf32>, tensor<1024x128xf32> -> tensor<256xf32>
     ```
   }];
 
   let arguments = (ins
     AnyRankedTensor:$query,
-    AnyRankedTensor:$database
+    AnyRankedTensor:$database,
+    DefaultValuedAttr<I64Attr, "1">:$k
   );
 
   let results = (outs
