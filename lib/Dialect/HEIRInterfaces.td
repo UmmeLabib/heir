@@ -300,8 +300,12 @@ def OperandAndResultAttrInterface : OpInterface<"OperandAndResultAttrInterface">
     ::mlir::DictionaryAttr getOperandAttrDict(unsigned index) {
       assert(index < $_op->getNumOperands() && "invalid argument number");
       ::mlir::ArrayAttr attrs = getAllOperandAttrsAttr();
+      // Guard index against the attr array too: a pass may leave __argattrs
+      // shorter than the operand count, and attrs[index] would read OOB.
       ::mlir::DictionaryAttr argAttrs =
-          attrs ? llvm::cast<DictionaryAttr>(attrs[index]) : ::mlir::DictionaryAttr();
+          (attrs && index < attrs.size())
+              ? llvm::cast<DictionaryAttr>(attrs[index])
+              : ::mlir::DictionaryAttr();
       return argAttrs;
     }
 
