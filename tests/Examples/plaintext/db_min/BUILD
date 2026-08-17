@@ -2,6 +2,9 @@ load("@heir//tests/llvm_runner:llvm_runner.bzl", "llvm_runner_test")
 
 package(default_applicable_licenses = ["@heir//:license"])
 
+# Shared with the OpenFHE end-to-end tests so both backends run one source.
+exports_files(["db_min_4.mlir"])
+
 # db.min end-to-end (tie at the minimum).
 llvm_runner_test(
     name = "db_min_4",
