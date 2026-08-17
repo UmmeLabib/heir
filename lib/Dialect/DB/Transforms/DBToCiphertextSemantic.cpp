@@ -1,5 +1,6 @@
 #include "lib/Dialect/DB/Transforms/DBToCiphertextSemantic.h"
 
+#include <cmath>
 #include <cstdint>
 #include <utility>
 
@@ -171,6 +172,16 @@ Value sumRows(OpBuilder &b, Location loc, Value x, int64_t n) {
   return maskRow0(b, loc, acc, n);
 }
 
+// Multiplicative twin of SumR: fold all rows into row 0 with products, so a
+// column survives only if every one of its entries is a win.  log2(n) levels.
+Value prodRows(OpBuilder &b, Location loc, Value x, int64_t n) {
+  Value acc = x;
+  for (int64_t i = 0; i < llvm::Log2_64(n); ++i)
+    acc = arith::MulFOp::create(b, loc, acc,
+                                rotateLeft(b, loc, acc, n * (1 << i)));
+  return maskRow0(b, loc, acc, n);
+}
+
 // SumC (Alg 10): fold all columns into column 0.
 Value sumCols(OpBuilder &b, Location loc, Value x, int64_t n) {
   Value acc = x;
@@ -247,9 +258,11 @@ struct RankResult {
 
 // Algs 3+6: one comparison ranks all pairs; K = SumR(C)+U-0.5T is an exact
 // permutation of 1..n even with duplicates.
-RankResult rankWithTieCorrection(OpBuilder &b, Location loc, Value vec,
+// `hall` is the n*n-slot matrix carrying the values in row 0; callers holding
+// a bare length-n vector build one with embedAsRow0 first.
+RankResult rankWithTieCorrection(OpBuilder &b, Location loc, Value hall,
                                  int64_t n, double cmpScale) {
-  Value v = embedAsRow0(b, loc, vec, n);
+  Value v = maskRow0(b, loc, hall, n);
   auto matTy = llvm::cast<RankedTensorType>(v.getType());
 
   Value vR = replRow0(b, loc, v, n);
@@ -292,7 +305,15 @@ LogicalResult lowerOrderStatistic(Operation *op, Value input, Type resultType,
   if (!ty || ty.getRank() != 1)
     return rewriter.notifyMatchFailure(op,
                                        "expected a 1-D ranked tensor input");
-  int64_t n = ty.getDimSize(0);
+  // The operand is already the n*n hall: the client packs its n values into
+  // slots 0..n-1 and zeros the rest before encrypting.  Growing a length-n
+  // secret tensor here instead would force a secret.conceal that CKKS
+  // lowering rejects.
+  int64_t len = ty.getDimSize(0);
+  int64_t n = static_cast<int64_t>(std::llround(std::sqrt(double(len))));
+  if (n * n != len)
+    return rewriter.notifyMatchFailure(
+        op, "input length must be a perfect square (the n*n hall)");
   if (!isPowerOfTwo(n))
     return rewriter.notifyMatchFailure(
         op, "matrix-encoded ranking requires a power-of-two length");
@@ -303,16 +324,38 @@ LogicalResult lowerOrderStatistic(Operation *op, Value input, Type resultType,
     return rewriter.notifyMatchFailure(
         op, "result type must match the input element type");
 
-  RankResult rank = rankWithTieCorrection(rewriter, loc, input, n,
-                                          1.0 / (2.0 * kSortInputAbsBound));
+  // One comparison, then a multiplicative fold.  Ranking and then running a
+  // second comparison to indicate rank n costs ~2x the comparator depth, which
+  // overruns the CKKS level budget; column j of C is all wins exactly when v_j
+  // is the extremum, so folding that column with products costs only log2(n).
+  Value v = maskRow0(rewriter, loc, input, n);
+  auto matTy = llvm::cast<RankedTensorType>(v.getType());
+  Value vR = replRow0(rewriter, loc, v, n);
+  Value vC = replCol0(rewriter, loc, transRow0ToCol0(rewriter, loc, v, n), n);
 
-  // Junk slots hold 0 and Ind_k(0) = 0; scale 1/(n+1) keeps -(k+0.5) in [-1,1].
-  double k = isMax ? static_cast<double>(n) : 1.0;
-  Value mask =
-      indicatorAround(rewriter, loc, rank.rankMat, k, 1.0 / (n + 1.0));
+  // c[i][j] = Cmp(v_j, v_i): 1 when v_j is larger, 0.5 on equality.
+  Value diff = arith::SubFOp::create(rewriter, loc, vR, vC);
+  Value c = cmpFromDiff(rewriter, loc, diff, 1.0 / (2.0 * kSortInputAbsBound));
+  Value one = constSplat(rewriter, loc, matTy, 1.0);
+  Value wins = isMax ? c : arith::SubFOp::create(rewriter, loc, one, c);
 
-  Value masked =
-      arith::MulFOp::create(rewriter, loc, mask, rank.valuesReplRows);
+  // e[i][j] = 4c(1-c) = 1 exactly on ties; adding e*(L-0.5) turns each tied
+  // 0.5 into a 1 for the lowest column index and a 0 for the rest, so exactly
+  // one column wins even when several values are equal.
+  Value e = arith::MulFOp::create(
+      rewriter, loc, constSplat(rewriter, loc, matTy, 4.0),
+      arith::MulFOp::create(rewriter, loc, c,
+                            arith::SubFOp::create(rewriter, loc, one, c)));
+  llvm::SmallVector<double> tieBreak(n * n, -0.5);
+  for (int64_t i = 0; i < n; ++i)
+    for (int64_t j = 0; j <= i; ++j) tieBreak[i * n + j] = 0.5;
+  Value w = arith::AddFOp::create(
+      rewriter, loc, wins,
+      arith::MulFOp::create(rewriter, loc, e,
+                            constDense(rewriter, loc, matTy, tieBreak)));
+
+  Value mask = prodRows(rewriter, loc, w, n);
+  Value masked = arith::MulFOp::create(rewriter, loc, mask, vR);
   Value total = rotateReduceAddVector(rewriter, loc, masked);
   Value idx0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value result =
@@ -363,7 +406,8 @@ LogicalResult lowerSort(SortOp op, PatternRewriter &rewriter) {
     return rewriter.notifyMatchFailure(
         op, "result type must match the input type");
 
-  RankResult rank = rankWithTieCorrection(rewriter, loc, input, n,
+  Value inputHall = embedAsRow0(rewriter, loc, input, n);
+  RankResult rank = rankWithTieCorrection(rewriter, loc, inputHall, n,
                                           1.0 / (2.0 * kSortInputAbsBound));
   auto matTy = llvm::cast<RankedTensorType>(rank.rankMat.getType());
 
@@ -473,7 +517,8 @@ LogicalResult lowerSearchSimilar(SearchSimilarOp op,
   // are an exact permutation of 1..n, so the top-k rows are exactly those
   // wearing badges n, n-1, ..., n-k+1 (one document each, even under ties).
   int64_t n = numRows;  // == dim (square hall)
-  RankResult rank = rankWithTieCorrection(rewriter, loc, scores, n,
+  Value scoreHall = embedAsRow0(rewriter, loc, scores, n);
+  RankResult rank = rankWithTieCorrection(rewriter, loc, scoreHall, n,
                                           1.0 / (2.0 * kScoreAbsBound));
   auto hallTy = llvm::cast<RankedTensorType>(rank.rankMat.getType());
 

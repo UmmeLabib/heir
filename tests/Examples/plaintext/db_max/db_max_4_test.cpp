@@ -1,4 +1,5 @@
-// db.max end-to-end: raw values in, client normalizes into [-4,4].
+// db.max end-to-end: raw values in, client normalizes into [-4,4] and packs
+// them into row 0 of the 4x4 hall (slots 0..3; slots 4..15 stay zero).
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +17,28 @@ void _mlir_ciface_db_max_4__encrypt__arg0(StridedMemRefType<float, 2>* result,
 float _mlir_ciface_db_max_4__decrypt__result0(
     StridedMemRefType<float, 2>* input);
 }
+
+namespace {
+
+// Pack 4 already-normalized values into the hall, run db.max, decrypt.
+float runMax(const float vals[4]) {
+  float input[16] = {0.0f};
+  for (int i = 0; i < 4; ++i) input[i] = vals[i];
+
+  StridedMemRefType<float, 2> encArg0;
+  StridedMemRefType<float> input0 = {input, input, 0, 16, 1};
+  _mlir_ciface_db_max_4__encrypt__arg0(&encArg0, &input0);
+
+  StridedMemRefType<float, 2> memref;
+  _mlir_ciface_db_max_4(&memref, &encArg0);
+
+  float result = _mlir_ciface_db_max_4__decrypt__result0(&memref);
+  free(encArg0.basePtr);
+  free(memref.basePtr);
+  return result;
+}
+
+}  // namespace
 
 TEST(DbMax4Test, MaxOfNormalized) {
   float raw[4] = {-100.0f, -1000.0f, 42.0f, 7.0f};
@@ -35,29 +58,7 @@ TEST(DbMax4Test, MaxOfNormalized) {
     input[i] = (raw[i] - center) * (4.0f / halfSpread);
   float expected = (rawExpected - center) * (4.0f / halfSpread);
 
-  StridedMemRefType<float, 2> encArg0;
-  StridedMemRefType<float> input0 = {input, input, 0, 4, 1};
-  _mlir_ciface_db_max_4__encrypt__arg0(&encArg0, &input0);
-
-  // Peek at the packed input buffer (plaintext backend = simulation).
-  std::printf("enc input  : %lld ct x %lld slots, first 8: [",
-              (long long)encArg0.sizes[0], (long long)encArg0.sizes[1]);
-  for (int i = 0; i < 8; ++i)
-    std::printf("%s%.3f", i ? ", " : "", encArg0.basePtr[encArg0.offset + i]);
-  std::printf(", ...]\n");
-
-  StridedMemRefType<float, 2> memref;
-  _mlir_ciface_db_max_4(&memref, &encArg0);
-
-  // Peek at the result buffer before decryption.
-  std::printf("enc result : %lld ct x %lld slots, first 8: [",
-              (long long)memref.sizes[0], (long long)memref.sizes[1]);
-  for (int i = 0; i < 8; ++i)
-    std::printf("%s%.3f", i ? ", " : "", memref.basePtr[memref.offset + i]);
-  std::printf(", ...]\n");
-
-  float result = _mlir_ciface_db_max_4__decrypt__result0(&memref);
-
+  float result = runMax(input);
   float rawResult = result * (halfSpread / 4.0f) + center;
 
   std::printf("raw input      : [%.2f, %.2f, %.2f, %.2f]\n", raw[0], raw[1],
@@ -69,7 +70,35 @@ TEST(DbMax4Test, MaxOfNormalized) {
               rawExpected);
 
   EXPECT_NEAR(result, expected, 1e-3f);
+}
 
-  free(encArg0.basePtr);
-  free(memref.basePtr);
+// The index tie-break (e * (L - 0.5)) must leave exactly one winning column,
+// so duplicates of the maximum still sum to the maximum and not a multiple or
+// a fraction of it.
+TEST(DbMax4Test, TwoWayTieOnMax) {
+  float input[4] = {4.0f, 4.0f, -4.0f, 1.0f};
+  float result = runMax(input);
+  std::printf("two-way tie   : [4, 4, -4, 1] -> %.5f\n", result);
+  EXPECT_NEAR(result, 4.0f, 1e-3f);
+}
+
+TEST(DbMax4Test, ThreeWayTieOnMax) {
+  float input[4] = {4.0f, 4.0f, 4.0f, -4.0f};
+  float result = runMax(input);
+  std::printf("three-way tie : [4, 4, 4, -4] -> %.5f\n", result);
+  EXPECT_NEAR(result, 4.0f, 1e-3f);
+}
+
+TEST(DbMax4Test, AllFourEqual) {
+  float input[4] = {2.5f, 2.5f, 2.5f, 2.5f};
+  float result = runMax(input);
+  std::printf("all equal     : [2.5 x4] -> %.5f\n", result);
+  EXPECT_NEAR(result, 2.5f, 1e-3f);
+}
+
+TEST(DbMax4Test, TwoDistinctPairs) {
+  float input[4] = {-3.0f, 3.0f, 3.0f, -3.0f};
+  float result = runMax(input);
+  std::printf("two pairs     : [-3, 3, 3, -3] -> %.5f\n", result);
+  EXPECT_NEAR(result, 3.0f, 1e-3f);
 }

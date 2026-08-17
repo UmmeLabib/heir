@@ -29,13 +29,14 @@ TEST(DbMin4Test, MinWithTieAtMinimum) {
   float center = (mn + mx) / 2.0f;
   float halfSpread = (mx - mn) / 2.0f;
 
-  float input[4];
+  // Pack the 4 values into row 0 of the 4x4 hall; slots 4..15 stay zero.
+  float input[16] = {0.0f};
   for (int i = 0; i < 4; ++i)
     input[i] = (raw[i] - center) * (4.0f / halfSpread);
   float expected = (rawExpected - center) * (4.0f / halfSpread);
 
   StridedMemRefType<float, 2> encArg0;
-  StridedMemRefType<float> input0 = {input, input, 0, 4, 1};
+  StridedMemRefType<float> input0 = {input, input, 0, 16, 1};
   _mlir_ciface_db_min_4__encrypt__arg0(&encArg0, &input0);
 
   StridedMemRefType<float, 2> memref;

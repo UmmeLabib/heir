@@ -33,8 +33,10 @@ TEST(DbMax16Test, MaxOfTenRawValuesPadded) {
   float center = (mn + mx) / 2.0f;
   float halfSpread = (mx - mn) / 2.0f;
 
-  // Pad with the minimum, then normalize into [-4,4].
-  float input[kSlots];
+  // Pad with the minimum, normalize into [-4,4], then pack into row 0 of the
+  // 16x16 hall; slots 16..255 stay zero.
+  constexpr int kHall = kSlots * kSlots;
+  float input[kHall] = {0.0f};
   for (int i = 0; i < kSlots; ++i) {
     float v = i < kRaw ? raw[i] : mn;
     input[i] = (v - center) * (4.0f / halfSpread);
@@ -42,7 +44,7 @@ TEST(DbMax16Test, MaxOfTenRawValuesPadded) {
   float expected = (rawExpected - center) * (4.0f / halfSpread);
 
   StridedMemRefType<float, 2> encArg0;
-  StridedMemRefType<float> input0 = {input, input, 0, kSlots, 1};
+  StridedMemRefType<float> input0 = {input, input, 0, kHall, 1};
   _mlir_ciface_db_max_16__encrypt__arg0(&encArg0, &input0);
 
   StridedMemRefType<float, 2> memref;

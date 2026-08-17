@@ -67,14 +67,17 @@ def DB_MaxOp : DB_Op<"max", []> {
     `db.max` returns the maximum element of the input ranked tensor.  The
     result type must match the element type of the input tensor.
 
-    This op is a high-level abstraction for FHE-friendly tree-based max
-    reductions, where the reduction is carried out via repeated rotate-and-compare
-    steps after lowering.
+    The operand is the `n x n` rank-kernel hall flattened row-major, not a
+    bare length-`n` vector: the client places its `n` values in slots
+    `0..n-1` and zeros the remaining `n*n - n` slots before encrypting.
+    Packing on the client keeps the lowering from growing a secret tensor,
+    which would emit a `secret.conceal` that CKKS lowering rejects.  `n` must
+    be a power of two.
 
     Example:
     ```mlir
-    // input: tensor<1024xi16>
-    %m = db.max %scores : tensor<1024xi16> -> i16
+    // 4 values live in slots 0..3 of a 4x4 hall; slots 4..15 are zero
+    %m = db.max %packed : tensor<16xf32> -> f32
     ```
   }];
 
@@ -103,12 +106,13 @@ def DB_MinOp : DB_Op<"min", []> {
     result type must match the element type of the input tensor.
 
     This is the dual of `db.max`, useful for oblivious minimum selection over
-    encrypted data.
+    encrypted data.  It takes the same client-packed `n x n` hall as `db.max`:
+    values in slots `0..n-1`, the rest zero, `n` a power of two.
 
     Example:
     ```mlir
-    // input: tensor<1024xi16>
-    %m = db.min %scores : tensor<1024xi16> -> i16
+    // 4 values live in slots 0..3 of a 4x4 hall; slots 4..15 are zero
+    %m = db.min %packed : tensor<16xf32> -> f32
     ```
   }];
 

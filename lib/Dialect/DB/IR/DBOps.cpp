@@ -1,5 +1,7 @@
 #include "lib/Dialect/DB/IR/DBOps.h"
 
+#include <cmath>
+
 // IWYU pragma: begin_keep
 #include "mlir/include/mlir/IR/BuiltinTypes.h"            // from @llvm-project
 #include "mlir/include/mlir/IR/OpImplementation.h"        // from @llvm-project
@@ -17,6 +19,24 @@ namespace db {
 //===----------------------------------------------------------------------===//
 // Shared verification helpers (reusable by SearchTopKOp and similar ops)
 //===----------------------------------------------------------------------===//
+
+// db.max/db.min take the n*n rank-kernel hall (values in row 0), not a bare
+// length-n vector, so the lowering never has to grow a secret tensor.
+static LogicalResult verifyIsSquareHall(mlir::Operation *op,
+                                        RankedTensorType inputType) {
+  if (inputType.getRank() != 1)
+    return op->emitOpError("input must be a 1-D tensor, but got rank ")
+           << inputType.getRank();
+  int64_t len = inputType.getDimSize(0);
+  int64_t n = static_cast<int64_t>(std::llround(std::sqrt(double(len))));
+  if (n * n != len)
+    return op->emitOpError("input length must be a perfect square n*n (the "
+                           "rank-kernel hall), but got ")
+           << len;
+  if (n <= 0 || (n & (n - 1)) != 0)
+    return op->emitOpError("hall side n must be a power of two, but got ") << n;
+  return success();
+}
 
 static LogicalResult verifyQueryIs1D(mlir::Operation *op,
                                      RankedTensorType queryType) {
@@ -118,7 +138,7 @@ LogicalResult MaxOp::verify() {
     return emitOpError("result type must match the element type of the input "
                        "tensor");
   }
-  return success();
+  return verifyIsSquareHall(getOperation(), inputType);
 }
 
 //===----------------------------------------------------------------------===//
@@ -131,7 +151,7 @@ LogicalResult MinOp::verify() {
     return emitOpError("result type must match the element type of the input "
                        "tensor");
   }
-  return success();
+  return verifyIsSquareHall(getOperation(), inputType);
 }
 
 //===----------------------------------------------------------------------===//
