@@ -85,9 +85,21 @@ struct OptimizeRelinearization
     // optimize-relinearization will invalidate mgmt attr
     // so re-annotate it
 
-    // temporary workaround for B/FV and all schemes of Openfhe
+    // Temporary workaround for B/FV, which must inherit its mulDepth.
+    //
+    // OpenFHE used to be part of this condition and was deliberately dropped:
+    // for leveled CKKS it re-seeds this level re-count with the already-full
+    // depth, so a circuit measured at 40 levels is counted again and reported
+    // as 80.  No secure parameters exist at that depth, and generate-param
+    // aborts with "logTotalPQ is too large" (RLWESecurityParams.cpp).
+    //
+    // Checked before keeping the change: HEIR's own OpenFHE end-to-end test
+    // (tests/Examples/openfhe/ckks/dot_product_8f) still decrypts correctly
+    // without it, and restoring the condition reproduces the abort.  Caveat:
+    // dot_product is a shallow circuit, so this is evidence, not proof, that
+    // the OpenFHE case was unnecessary for every circuit shape.
     auto baseLevel = 0;
-    if (moduleIsBFV(getOperation()) || moduleIsOpenfhe(getOperation())) {
+    if (moduleIsBFV(getOperation())) {
       // inherit mulDepth information from existing mgmt attr.
       mgmt::MgmtAttr mgmtAttr = nullptr;
       getOperation()->walk([&](secret::GenericOp op) {
